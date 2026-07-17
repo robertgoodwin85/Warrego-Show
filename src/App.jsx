@@ -80,8 +80,14 @@ const db = {
 
   // Payments
   getPayments: () => sbFetch("payments?select=*"),
-  upsertPayment: (userId) => sbFetch("payments", { method: "POST", headers: { "Prefer": "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({
-    user_id: userId, paid: true, paid_at: new Date().toISOString(),
+  upsertPayment: (userId, status="pending") => sbFetch("payments", { method: "POST", headers: { "Prefer": "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({
+    user_id: userId, paid: status==="confirmed", status, paid_at: status==="confirmed" ? new Date().toISOString() : null,
+  })}),
+  confirmPayment: (userId) => sbFetch("payments", { method: "POST", headers: { "Prefer": "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({
+    user_id: userId, paid: true, status: "confirmed", paid_at: new Date().toISOString(),
+  })}),
+  markUnpaid: (userId) => sbFetch("payments", { method: "POST", headers: { "Prefer": "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({
+    user_id: userId, paid: false, status: "pending", paid_at: null,
   })}),
 
   // Class start times
@@ -524,11 +530,10 @@ function PaymentScreen({ user, entries, onComplete, onBack }) {
   const myEntries=entries.filter(e=>e.ownerId===user.id);
   const total=myEntries.length*ENTRY_FEE;
   const byHorse=myEntries.reduce((acc,e)=>{if(!acc[e.horse])acc[e.horse]=[];acc[e.horse].push(e);return acc;},{});
-  const handlePay=()=>{
-    const url=`https://buy.stripe.com/dRm6oA8N33Xn2Of4aOfnO00?quantity=${myEntries.length}`;
-    window.open(url,"_blank");
-    onComplete();
-  };
+  const nameParts=(user.name||"").trim().split(/\s+/).filter(Boolean);
+  const firstInitial=(nameParts[0]||"").charAt(0).toUpperCase();
+  const lastNamePart=nameParts.length>1?nameParts[nameParts.length-1]:(nameParts[0]||"").slice(1);
+  const paymentRef=(firstInitial+lastNamePart.replace(/[^a-zA-Z]/g,"").toUpperCase().slice(0,4))||"GUEST";
   return (
     <div style={{minHeight:"100vh",background:BG,fontFamily:"Georgia,serif",color:"#e8d5a3",padding:"0 16px 56px"}}>
       <div style={{maxWidth:600,margin:"0 auto",paddingTop:22}}>
@@ -548,16 +553,24 @@ function PaymentScreen({ user, entries, onComplete, onBack }) {
           <div style={{marginTop:8,fontSize:12,color:"#6b7a5e"}}>{myEntries.length} {myEntries.length===1?"entry":"entries"} × ${ENTRY_FEE} each</div>
         </Card>
         <Card style={{marginBottom:14}}>
-          <h3 style={{color:"#d4af37",fontSize:14,marginBottom:12,letterSpacing:"0.06em"}}>Payment</h3>
-          <p style={{fontSize:13,color:"#9aab8a",marginBottom:16,lineHeight:1.7}}>You will be redirected to our secure Stripe payment page to complete your payment of <strong style={{color:"#d4af37"}}>${total}.00</strong>. We accept Visa, Mastercard and American Express.</p>
-          <div style={{background:"rgba(212,175,55,0.07)",border:"1px solid rgba(212,175,55,0.18)",borderRadius:8,padding:"10px 13px",fontSize:12,color:"#8a9b7e",marginBottom:16}}>
-            <div style={{marginBottom:4}}><span style={{color:"#6b7a5e"}}>Business: </span><span style={{color:"#e8d5a3"}}>Warrego Park</span></div>
-            <div><span style={{color:"#6b7a5e"}}>ABN: </span><span style={{color:"#e8d5a3"}}>45 866 039 726</span></div>
+          <div style={{background:"rgba(74,222,128,0.08)",border:"1px solid rgba(74,222,128,0.25)",borderRadius:8,padding:"12px 14px",fontSize:13,color:"#9aab8a",lineHeight:1.7,marginBottom:16}}>
+            <span style={{color:"#4ade80",fontWeight:"bold"}}>✅ Your entries are confirmed.</span> You're welcome to add, change or remove entries right up until the start of the relevant class.
           </div>
-          <button onClick={handlePay} style={{width:"100%",padding:"14px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#6772e5,#4c59d6)",color:"#fff",fontFamily:"Georgia,serif",fontSize:16,fontWeight:"bold",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-            <span>💳</span> Pay ${total}.00 with Stripe
+          <h3 style={{color:"#d4af37",fontSize:14,marginBottom:12,letterSpacing:"0.06em"}}>Payment — Direct Deposit</h3>
+          <p style={{fontSize:13,color:"#9aab8a",marginBottom:16,lineHeight:1.7}}>Please pay your total of <strong style={{color:"#d4af37"}}>${total}.00</strong> by direct bank transfer using the details below, including your payment reference so we can match it to your entries.</p>
+          <div style={{background:"rgba(212,175,55,0.07)",border:"1px solid rgba(212,175,55,0.18)",borderRadius:8,padding:"14px 16px",fontSize:13,color:"#8a9b7e",marginBottom:16}}>
+            <div style={{marginBottom:8}}><span style={{color:"#6b7a5e"}}>Account Name: </span><span style={{color:"#e8d5a3",fontWeight:"bold"}}>Robert Goodwin</span></div>
+            <div style={{marginBottom:8}}><span style={{color:"#6b7a5e"}}>BSB: </span><span style={{color:"#e8d5a3",fontWeight:"bold"}}>734226</span></div>
+            <div style={{marginBottom:8}}><span style={{color:"#6b7a5e"}}>Account Number: </span><span style={{color:"#e8d5a3",fontWeight:"bold"}}>546578</span></div>
+            <div style={{marginTop:10,paddingTop:10,borderTop:"1px solid rgba(212,175,55,0.15)"}}>
+              <span style={{color:"#6b7a5e"}}>Payment Reference (please include): </span>
+              <div style={{color:"#d4af37",fontWeight:"bold",fontSize:16,letterSpacing:"0.04em",marginTop:4}}>{paymentRef}</div>
+            </div>
+          </div>
+          <button onClick={onComplete} style={{width:"100%",padding:"14px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#d4af37,#b8942c)",color:"#1a1a1a",fontFamily:"Georgia,serif",fontSize:16,fontWeight:"bold",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+            <span>🏦</span> I've made my direct deposit
           </button>
-          <p style={{textAlign:"center",fontSize:11,color:"#5a6a50",marginTop:10}}>Secured by Stripe · SSL Encrypted</p>
+          <p style={{textAlign:"center",fontSize:11,color:"#5a6a50",marginTop:10}}>Your payment will show as confirmed once received — same as before.</p>
         </Card>
         <div style={{textAlign:"center"}}><button onClick={onBack} style={{background:"transparent",border:"none",color:"#5a6a50",fontFamily:"Georgia,serif",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>← Back to my entries</button></div>
       </div>
@@ -725,6 +738,12 @@ export default function App() {
   const [waiverSigned,setWaiverSigned]=useState({});
   const [healthSigned,setHealthSigned]=useState({});
   const [paidEntries,setPaidEntries]=useState({});
+  const payStatus=(id)=>{
+    const p=paidEntries[id];
+    if(!p) return {label:"Payment pending",short:"Payment pending",color:"#f87171",bg:"rgba(239,68,68,0.1)",border:"rgba(239,68,68,0.3)"};
+    if(p.status==="confirmed"||p.paid) return {label:"Payment confirmed",short:"Payment confirmed",color:"#4ade80",bg:"rgba(34,197,94,0.1)",border:"rgba(34,197,94,0.3)"};
+    return {label:"Awaiting confirmation",short:"Deposit made — awaiting confirmation",color:"#eab308",bg:"rgba(234,179,8,0.1)",border:"rgba(234,179,8,0.3)"};
+  };
   const [view,setView]=useState("home");
   const [activeDay,setActiveDay]=useState("sat");
   const [entries,setEntries]=useState([]);
@@ -785,7 +804,7 @@ export default function App() {
         setHealthSigned(healthMap);
 
         const paidMap = {};
-        pys.forEach(p => { if (p.paid) paidMap[p.user_id] = true; });
+        pys.forEach(p => { paidMap[p.user_id] = { paid: !!p.paid, status: p.status || (p.paid ? "confirmed" : "pending") }; });
         setPaidEntries(paidMap);
 
         const startTimesMap = {};
@@ -894,6 +913,19 @@ export default function App() {
     catch(err) { console.error(err); showToast("Reset locally but failed to sync.","error"); }
   };
 
+  const confirmPaymentReceived=async(accountId)=>{
+    setPaidEntries(p=>({...p,[accountId]:{paid:true,status:"confirmed"}}));
+    showToast("Payment confirmed!");
+    try { await db.confirmPayment(accountId); }
+    catch(err) { console.error(err); showToast("Confirmed locally but failed to sync.","error"); }
+  };
+  const markPaymentUnpaid=async(accountId)=>{
+    setPaidEntries(p=>({...p,[accountId]:{paid:false,status:"pending"}}));
+    showToast("Marked as unpaid.");
+    try { await db.markUnpaid(accountId); }
+    catch(err) { console.error(err); showToast("Updated locally but failed to sync.","error"); }
+  };
+
   const doPrint=(classId)=>{setPrintClassId(classId);setTimeout(()=>window.print(),150);};
   const printCls=cls(printClassId);
   const printRanked=printClassId?rankEntries(printClassId,entries,scores):[];
@@ -937,8 +969,9 @@ export default function App() {
     catch(err) { console.error(err); showToast("Health dec saved locally but failed to sync.","error"); }
   }}/>;
   if(showPayment&&user.role==="client") return <PaymentScreen user={user} entries={entries} onComplete={async()=>{
-    setPaidEntries(p=>({...p,[user.id]:true}));setShowPayment(false);showToast("Payment submitted! 🐴");
-    try { await db.upsertPayment(user.id); }
+    setPaidEntries(p=>({...p,[user.id]:{paid:false,status:"pending"}}));setShowPayment(false);
+    showToast("Your entries are confirmed — payment will show as pending until we've received your direct deposit.","info");
+    try { await db.upsertPayment(user.id, "pending"); }
     catch(err) { console.error(err); showToast("Payment recorded locally but failed to sync.","error"); }
   }} onBack={()=>setShowPayment(false)}/>;
   if(user.role==="spectator") return <SpectatorView entries={entries} scores={scores} classStartTimes={classStartTimes} onBack={()=>setUser(null)}/>;
@@ -999,7 +1032,7 @@ export default function App() {
                 ))}
                 <div style={{marginTop:6}}><span style={{color:"#6b7a5e"}}>Waiver: </span><span style={{color:waiverSigned[user.id]?"#4ade80":"#f87171"}}>{waiverSigned[user.id]?`Signed ${waiverSigned[user.id].date}`:"Not yet signed"}</span></div>
                 <div style={{marginTop:6}}><span style={{color:"#6b7a5e"}}>Health Dec: </span><span style={{color:healthSigned[user.id]?"#4ade80":"#f87171"}}>{healthSigned[user.id]?`Submitted ${healthSigned[user.id].date}`:"Not yet submitted"}</span></div>
-                <div style={{marginTop:6}}><span style={{color:"#6b7a5e"}}>Payment: </span><span style={{color:paidEntries[user.id]?"#4ade80":"#f87171"}}>{paidEntries[user.id]?"Completed":"Pending"}</span></div>
+                <div style={{marginTop:6}}><span style={{color:"#6b7a5e"}}>Payment: </span><span style={{color:payStatus(user.id).color}}>{payStatus(user.id).label}</span></div>
                 <div style={{display:"flex",gap:10,marginTop:16}}>
                   <Btn size="sm" onClick={()=>setEditingAccount({...user})}>Edit Details</Btn>
                   <Btn size="sm" variant="ghost" onClick={()=>setProfileOpen(false)}>Close</Btn>
@@ -1079,8 +1112,8 @@ export default function App() {
                   <div style={{fontSize:12,padding:"4px 10px",borderRadius:6,background:healthSigned[user.id]?"rgba(34,197,94,0.1)":"rgba(239,68,68,0.1)",color:healthSigned[user.id]?"#4ade80":"#f87171",border:`1px solid ${healthSigned[user.id]?"rgba(34,197,94,0.3)":"rgba(239,68,68,0.3)"}`}}>
                     {healthSigned[user.id]?"✅ Health dec submitted":"⚠️ Health dec pending"}
                   </div>
-                  <div style={{fontSize:12,padding:"4px 10px",borderRadius:6,background:paidEntries[user.id]?"rgba(34,197,94,0.1)":"rgba(239,68,68,0.1)",color:paidEntries[user.id]?"#4ade80":"#f87171",border:`1px solid ${paidEntries[user.id]?"rgba(34,197,94,0.3)":"rgba(239,68,68,0.3)"}`}}>
-                    {paidEntries[user.id]?"✅ Payment complete":"⚠️ Payment pending"}
+                  <div style={{fontSize:12,padding:"4px 10px",borderRadius:6,background:payStatus(user.id).bg,color:payStatus(user.id).color,border:`1px solid ${payStatus(user.id).border}`}}>
+                    {payStatus(user.id).short}
                   </div>
                 </div>
               </Card>
@@ -1343,7 +1376,7 @@ export default function App() {
                     {a.memberNum&&<div><span style={{color:"#6b7a5e"}}>🏅 </span><span style={{color:"#9aab8a"}}>EA: {a.memberNum}</span></div>}
                     <div><span style={{color:"#6b7a5e"}}>📝 </span><span style={{color:waiverSigned[a.id]?"#4ade80":"#f87171"}}>{waiverSigned[a.id]?`Waiver signed ${waiverSigned[a.id].date}`:"Waiver not yet signed"}</span></div>
                     <div><span style={{color:"#6b7a5e"}}>🐴 </span><span style={{color:healthSigned[a.id]?"#4ade80":"#f87171"}}>{healthSigned[a.id]?`Health dec ${healthSigned[a.id].date}`:"Health dec pending"}</span></div>
-                    <div><span style={{color:"#6b7a5e"}}>💳 </span><span style={{color:paidEntries[a.id]?"#4ade80":"#f87171"}}>{paidEntries[a.id]?"Payment completed":"Payment pending"}</span></div>
+                    <div><span style={{color:"#6b7a5e"}}>💳 </span><span style={{color:payStatus(a.id).color}}>{payStatus(a.id).label}</span></div>
                   </div>
                   {resettingId===a.id?(
                     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -1352,7 +1385,14 @@ export default function App() {
                       <Btn size="sm" variant="ghost" onClick={()=>{setResettingId(null);setNewPassInput("");}}>Cancel</Btn>
                     </div>
                   ):(
-                    <Btn size="sm" variant="ghost" onClick={()=>{setResettingId(a.id);setNewPassInput("");}}>🔑 Reset Password</Btn>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <Btn size="sm" variant="ghost" onClick={()=>{setResettingId(a.id);setNewPassInput("");}}>🔑 Reset Password</Btn>
+                      {payStatus(a.id).color!=="#4ade80" ? (
+                        <Btn size="sm" onClick={()=>confirmPaymentReceived(a.id)}>🏦 Confirm Payment Received</Btn>
+                      ) : (
+                        <Btn size="sm" variant="ghost" onClick={()=>markPaymentUnpaid(a.id)}>Mark Unpaid</Btn>
+                      )}
+                    </div>
                   )}
                 </Card>
             ))}
