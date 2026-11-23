@@ -1324,6 +1324,541 @@ function InstallBanner() {
   );
 }
 
+// ── HORSES & PROPERTY ─────────────────────────────────────────────────────────
+// Day-to-day register of every horse on Warrego Park (own, agisted, in training).
+// Separate from show entries. Data lives in property_horses / property_care_log
+// (see supabase/property_horses.sql). Loaded only when this section is opened,
+// so the show side keeps working even before the migration has been run.
+const OWNER_TYPES = [
+  { key:"own",      label:"Ours",        color:"#d4af37" },
+  { key:"agist",    label:"Agisted",     color:"#38bdf8" },
+  { key:"training", label:"In training", color:"#4ade80" },
+  { key:"other",    label:"Other",       color:"#9aab8a" },
+];
+const ownerTypeOf = (k) => OWNER_TYPES.find(t=>t.key===k) || OWNER_TYPES[3];
+const CARE_TYPES = [
+  { key:"farrier",     label:"Farrier",     icon:"🔨", days:42  },
+  { key:"worming",     label:"Worming",     icon:"💊", days:90  },
+  { key:"vaccination", label:"Vaccination", icon:"💉", days:182 },
+  { key:"dentist",     label:"Dentist",     icon:"🦷", days:365 },
+  { key:"vet",         label:"Vet",         icon:"🩺", days:0   },
+  { key:"other",       label:"Other",       icon:"📝", days:0   },
+];
+const careTypeOf = (k) => CARE_TYPES.find(t=>t.key===k) || CARE_TYPES[5];
+
+// Dates are stored as "YYYY-MM-DD". Do all day maths in UTC so there's no timezone drift.
+const dUTC = (s) => { const [y,m,d] = s.split("-").map(Number); return Date.UTC(y, m-1, d); };
+const DAY_MS = 86400000;
+const todayStr = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`; };
+const addDays = (s, n) => new Date(dUTC(s) + n*DAY_MS).toISOString().slice(0,10);
+const daysBetween = (a, b) => Math.round((dUTC(b) - dUTC(a)) / DAY_MS);
+const fmtDate = (s) => s ? new Date(dUTC(s)).toLocaleDateString("en-AU", { day:"numeric", month:"short", year:"numeric", timeZone:"UTC" }) : "";
+const wksDays = (n) => {
+  const w = Math.floor(n/7), d = n%7;
+  if (w===0) return `${d} day${d===1?"":"s"}`;
+  return `${w} wk${w===1?"":"s"}${d?` ${d} day${d===1?"":"s"}`:""}`;
+};
+// Days a horse was on the property within [from, to] (both inclusive).
+// Arrival day counts; departure day doesn't (they left that day).
+function daysInPeriod(h, from, to) {
+  if (!h.arrivalDate) return 0;
+  const start = h.arrivalDate > from ? h.arrivalDate : from;
+  const endExcl = h.departureDate && h.departureDate <= addDays(to,1) ? h.departureDate : addDays(to,1);
+  return Math.max(0, daysBetween(start, endExcl));
+}
+const monthBounds = (offset=0) => {
+  const n = new Date(); const y = n.getFullYear(), m = n.getMonth() + offset;
+  const first = new Date(Date.UTC(y, m, 1)), last = new Date(Date.UTC(y, m+1, 0));
+  return [first.toISOString().slice(0,10), last.toISOString().slice(0,10)];
+};
+
+const nz = (v) => (v===""||v===undefined) ? null : v;
+const pdb = {
+  getHorses: () => sbFetch("property_horses?select=*&order=name.asc"),
+  upsertHorse: (h) => sbFetch("property_horses", { method:"POST", headers:{ "Prefer":"resolution=merge-duplicates,return=representation" }, body: JSON.stringify({
+    id:h.id, name:h.name, breed:nz(h.breed), sex:nz(h.sex), colour:nz(h.colour), dob:nz(h.dob), microchip:nz(h.microchip),
+    owner_type:h.ownerType||"own", owner_name:nz(h.ownerName), owner_phone:nz(h.ownerPhone), location:nz(h.location),
+    arrival_date:nz(h.arrivalDate), departure_date:nz(h.departureDate),
+    rate_per_week: h.ratePerWeek===""||h.ratePerWeek==null ? null : Number(h.ratePerWeek),
+    paid_up_to:nz(h.paidUpTo), feed_notes:nz(h.feedNotes), notes:nz(h.notes),
+  })}),
+  deleteHorse: (id) => sbFetch(`property_horses?id=eq.${id}`, { method:"DELETE", prefer:"return=minimal" }),
+  getCare: () => sbFetch("property_care_log?select=*"),
+  insertCare: (c) => sbFetch("property_care_log", { method:"POST", body: JSON.stringify({
+    id:c.id, horse_id:c.horseId, type:c.type, date:c.date, next_due:nz(c.nextDue), notes:nz(c.notes),
+  })}),
+  deleteCare: (id) => sbFetch(`property_care_log?id=eq.${id}`, { method:"DELETE", prefer:"return=minimal" }),
+};
+const mapHorse = (r) => ({
+  id:r.id, name:r.name, breed:r.breed||"", sex:r.sex||"", colour:r.colour||"", dob:r.dob||"", microchip:r.microchip||"",
+  ownerType:r.owner_type||"own", ownerName:r.owner_name||"", ownerPhone:r.owner_phone||"", location:r.location||"",
+  arrivalDate:r.arrival_date||"", departureDate:r.departure_date||"",
+  ratePerWeek:r.rate_per_week==null?"":String(r.rate_per_week), paidUpTo:r.paid_up_to||"",
+  feedNotes:r.feed_notes||"", notes:r.notes||"",
+});
+const mapCare = (r) => ({ id:r.id, horseId:r.horse_id, type:r.type, date:r.date, nextDue:r.next_due||"", notes:r.notes||"" });
+const EMPTY_HORSE = { name:"", breed:"", sex:"", colour:"", dob:"", microchip:"", ownerType:"own", ownerName:"", ownerPhone:"", location:"", arrivalDate:"", departureDate:"", ratePerWeek:"", paidUpTo:"", feedNotes:"", notes:"" };
+
+function Pill({ color, children }) {
+  return <span style={{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:11,border:`1px solid ${color}55`,background:`${color}1a`,color,whiteSpace:"nowrap"}}>{children}</span>;
+}
+
+function OrgHub({ user, onPick, onSignOut }) {
+  const tile = { display:"block", width:"100%", textAlign:"left", padding:"22px 20px", borderRadius:12, border:"1px solid rgba(212,175,55,0.3)", background:"rgba(212,175,55,0.06)", cursor:"pointer", fontFamily:"Georgia,serif", marginBottom:14 };
+  return (
+    <div style={{minHeight:"100vh",background:BG,fontFamily:"Georgia,serif",color:"#e8d5a3"}}>
+      <div style={{maxWidth:520,margin:"0 auto",padding:"22px 16px 56px"}}>
+        <Logo subtitle={`Organiser · ${user.name}`}/>
+        <p style={{textAlign:"center",color:"#9aab8a",fontSize:14,margin:"6px 0 22px"}}>Where do you want to go?</p>
+        <button style={tile} onClick={()=>onPick("show")}>
+          <div style={{fontSize:28,marginBottom:6}}>🏆</div>
+          <div style={{color:"#d4af37",fontSize:18,fontWeight:"bold"}}>Show Entries</div>
+          <div style={{color:"#9aab8a",fontSize:13,marginTop:4}}>Entries, schedule, scoring, clients and results</div>
+        </button>
+        <button style={tile} onClick={()=>onPick("property")}>
+          <div style={{fontSize:28,marginBottom:6}}>🐴</div>
+          <div style={{color:"#d4af37",fontSize:18,fontWeight:"bold"}}>Horses & Property</div>
+          <div style={{color:"#9aab8a",fontSize:13,marginTop:4}}>Every horse on the property, care due dates and agistment days for invoices</div>
+        </button>
+        <div style={{textAlign:"center",marginTop:10}}>
+          <button onClick={onSignOut} style={{background:"transparent",border:"none",color:"#5a6a50",fontFamily:"Georgia,serif",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Sign out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PropertyManager({ user, accounts, setAccounts, onSwitch, onSignOut }) {
+  const [loading,setLoading]=useState(true);
+  const [loadErr,setLoadErr]=useState("");
+  const [horses,setHorses]=useState([]);
+  const [care,setCare]=useState([]);
+  const [tab,setTab]=useState("horses");
+  const [filter,setFilter]=useState("here"); // here | left | all
+  const [search,setSearch]=useState("");
+  const [openId,setOpenId]=useState(null);
+  const [editing,setEditing]=useState(null); // horse form object (with id if editing)
+  const [careForm,setCareForm]=useState(null); // {horseId,type,date,nextDue,notes}
+  const [confirm,setConfirm]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [[invFrom,invTo],setInvRange]=useState(()=>monthBounds(0));
+  const [invTypes,setInvTypes]=useState(["agist","training"]);
+  const [helperForm,setHelperForm]=useState(null);
+  const today=todayStr();
+
+  const showToast=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),2800);};
+
+  const load=async()=>{
+    setLoading(true); setLoadErr("");
+    try {
+      const [hs,cs]=await Promise.all([pdb.getHorses(),pdb.getCare()]);
+      setHorses(hs.map(mapHorse)); setCare(cs.map(mapCare));
+    } catch(err) {
+      console.error(err);
+      setLoadErr(err.httpStatus===404||/property_/.test(err.message)
+        ? "The horse tables haven't been set up in Supabase yet. Run supabase/property_horses.sql in the Supabase SQL editor, then tap Retry."
+        : (err.message||"Couldn't load horses."));
+    }
+    setLoading(false);
+  };
+  useEffect(()=>{ load(); },[]);
+
+  // Latest care entry per horse+type → that's the one whose next-due date matters.
+  const latestCare=(horseId)=>{
+    const out={};
+    care.filter(c=>c.horseId===horseId).forEach(c=>{ if(!out[c.type]||c.date>out[c.type].date) out[c.type]=c; });
+    return out;
+  };
+  const isHere=(h)=>!h.departureDate||h.departureDate>today;
+  const dueItems=horses.filter(isHere).flatMap(h=>Object.values(latestCare(h.id)).filter(c=>c.nextDue).map(c=>({horse:h,c,diff:daysBetween(today,c.nextDue)}))).sort((a,b)=>a.diff-b.diff);
+  const overdueCount=dueItems.filter(d=>d.diff<0).length;
+  const weekCount=dueItems.filter(d=>d.diff>=0&&d.diff<=7).length;
+
+  const saveHorse=async()=>{
+    const f=editing;
+    if(!f.name.trim()){showToast("Please enter the horse's name.","error");return;}
+    if(f.departureDate&&f.arrivalDate&&f.departureDate<f.arrivalDate){showToast("Departure date is before the arrival date.","error");return;}
+    const h={...f,name:f.name.trim(),id:f.id||genId()};
+    const prev=horses;
+    setHorses(hs=>[...hs.filter(x=>x.id!==h.id),h].sort((a,b)=>a.name.localeCompare(b.name)));
+    setEditing(null); setOpenId(h.id);
+    try { await pdb.upsertHorse(h); showToast(f.id?"Horse updated.":"Horse added."); }
+    catch(err){ console.error(err); if(err.httpStatus) setHorses(prev); showToast(syncFailMessage("Horse saved",err),"error"); }
+  };
+  const removeHorse=(h)=>setConfirm({msg:`Remove ${h.name} and all its care records? (If it's just left the property, use "Mark as left" instead so it stays in your invoice history.)`,onYes:async()=>{
+    setConfirm(null);
+    setHorses(hs=>hs.filter(x=>x.id!==h.id)); setCare(cs=>cs.filter(c=>c.horseId!==h.id)); setOpenId(null);
+    try { await pdb.deleteHorse(h.id); showToast("Horse removed."); }
+    catch(err){ console.error(err); showToast(syncFailMessage("Horse removed",err),"error"); }
+  }});
+  const markLeft=async(h)=>{
+    const u={...h,departureDate:today};
+    setHorses(hs=>hs.map(x=>x.id===h.id?u:x));
+    try { await pdb.upsertHorse(u); showToast(`${h.name} marked as left today.`); }
+    catch(err){ console.error(err); showToast(syncFailMessage("Change saved",err),"error"); }
+  };
+  const saveCare=async()=>{
+    const f=careForm;
+    if(!f.date){showToast("Please pick the date it was done.","error");return;}
+    const c={...f,id:genId()};
+    setCare(cs=>[...cs,c]); setCareForm(null);
+    try { await pdb.insertCare(c); showToast(`${careTypeOf(c.type).label} recorded.`); }
+    catch(err){ console.error(err); showToast(syncFailMessage("Care record saved",err),"error"); }
+  };
+  const removeCare=(c)=>setConfirm({msg:`Remove this ${careTypeOf(c.type).label.toLowerCase()} record from ${fmtDate(c.date)}?`,onYes:async()=>{
+    setConfirm(null); setCare(cs=>cs.filter(x=>x.id!==c.id));
+    try { await pdb.deleteCare(c.id); }
+    catch(err){ console.error(err); showToast(syncFailMessage("Record removed",err),"error"); }
+  }});
+  const openCareForm=(horseId,type="farrier")=>setCareForm({horseId,type,date:today,nextDue:careTypeOf(type).days?addDays(today,careTypeOf(type).days):"",notes:""});
+
+  // ── Access (organiser logins) ──
+  const orgAccounts=accounts.filter(a=>a.role==="organiser");
+  const toggleAccess=async(a)=>{
+    const val=!a.propertyAccess;
+    setAccounts(as=>as.map(x=>x.id===a.id?{...x,propertyAccess:val}:x));
+    try { await db.updateAccount(a.id,{property_access:val}); showToast(val?`${a.name} can now see Horses & Property.`:`${a.name} now goes straight to Show Entries.`); }
+    catch(err){ console.error(err); setAccounts(as=>as.map(x=>x.id===a.id?{...x,propertyAccess:!val}:x)); showToast(syncFailMessage("Access change",err),"error"); }
+  };
+  const addHelper=async()=>{
+    const f=helperForm;
+    const uname=f.username.trim().toLowerCase();
+    if(!f.name.trim()||!uname||!f.password){showToast("Please fill in name, username and password.","error");return;}
+    if(accounts.some(a=>a.username===uname)){showToast("That username is already taken.","error");return;}
+    const acc={id:genId(),name:f.name.trim(),role:"organiser",username:uname,password:f.password,propertyAccess:false};
+    setAccounts(as=>[...as,acc]); setHelperForm(null);
+    try { await db.insertAccount(acc); showToast(`Login created for ${acc.name}.`); }
+    catch(err){ console.error(err); showToast(syncFailMessage("Login saved",err),"error"); }
+  };
+
+  const tabs=[
+    {key:"horses",label:"🐴 Horses"},
+    {key:"due",label:`📋 Due${overdueCount+weekCount?` (${overdueCount+weekCount})`:""}`},
+    {key:"invoices",label:"🧾 Invoices"},
+    {key:"access",label:"🔑 Access"},
+  ];
+  const tabBtn=(active)=>({padding:"8px 14px",borderRadius:6,border:"1px solid",borderColor:active?"#d4af37":"rgba(212,175,55,0.2)",background:active?"rgba(212,175,55,0.13)":"rgba(255,255,255,0.03)",color:active?"#d4af37":"#9aab8a",cursor:"pointer",fontFamily:"Georgia,serif",fontSize:13});
+  const chip=(active)=>({...tabBtn(active),padding:"5px 11px",fontSize:12});
+  const grid2={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12};
+
+  const stayLine=(h)=>{
+    if(!h.arrivalDate) return "No arrival date set";
+    if(h.arrivalDate>today) return `Arriving ${fmtDate(h.arrivalDate)}`;
+    if(isHere(h)){ const n=daysBetween(h.arrivalDate,today); return n===0?"Arrived today":`Here ${n} day${n===1?"":"s"} (${wksDays(n)})`; }
+    const n=daysBetween(h.arrivalDate,h.departureDate); return `Was here ${n} day${n===1?"":"s"} · left ${fmtDate(h.departureDate)}`;
+  };
+  const dueBadge=(diff)=>diff<0?<Pill color="#f87171">{-diff}d overdue</Pill>:diff===0?<Pill color="#f87171">Due today</Pill>:diff<=7?<Pill color="#eab308">in {diff}d</Pill>:<Pill color="#9aab8a">in {diff}d</Pill>;
+
+  const shown=horses
+    .filter(h=>filter==="all"||(filter==="here"?isHere(h):!isHere(h)))
+    .filter(h=>{const q=search.trim().toLowerCase(); return !q||[h.name,h.ownerName,h.location,h.breed].some(v=>(v||"").toLowerCase().includes(q));});
+
+  // ── Invoices ──
+  const invRows=horses.filter(h=>invTypes.includes(h.ownerType)).map(h=>{
+    const days=daysInPeriod(h,invFrom,invTo);
+    const rate=h.ratePerWeek===""?null:Number(h.ratePerWeek);
+    return {h,days,rate,amount:rate==null?null:Math.round(rate*days/7*100)/100};
+  }).filter(r=>r.days>0);
+  const invGroups={};
+  invRows.forEach(r=>{const k=r.h.ownerName.trim()||"(No owner name)"; (invGroups[k]=invGroups[k]||[]).push(r);});
+  const invOwners=Object.keys(invGroups).sort();
+  const copyInvoice=async(owner)=>{
+    const rows=invGroups[owner];
+    const lines=[`Warrego Park — agistment ${fmtDate(invFrom)} to ${fmtDate(invTo)}`,`For: ${owner}`,""];
+    rows.forEach(r=>lines.push(`${r.h.name}: ${r.days} days (${wksDays(r.days)})${r.rate!=null?` @ $${r.rate.toFixed(2)}/wk = $${r.amount.toFixed(2)}`:""}`));
+    const total=rows.reduce((s,r)=>s+(r.amount||0),0);
+    if(rows.some(r=>r.amount!=null)) lines.push("",`Total: $${total.toFixed(2)}`);
+    const text=lines.join("\n");
+    try { await navigator.clipboard.writeText(text); showToast("Copied — paste it into your invoice or a message."); }
+    catch(err){ console.error(err); window.prompt("Copy this:",text); }
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:BG,fontFamily:"Georgia,serif",color:"#e8d5a3"}}>
+      <Toast toast={toast}/>
+      {confirm&&<ConfirmDialog msg={confirm.msg} onYes={confirm.onYes} onNo={()=>setConfirm(null)}/>}
+      <div style={{maxWidth:960,margin:"0 auto",padding:"0 16px 56px"}}>
+        <div style={{padding:"22px 0 12px"}}>
+          <Logo subtitle={`Horses & Property · ${user.name}`}/>
+          <div style={{textAlign:"center",display:"flex",justifyContent:"center",gap:14,flexWrap:"wrap"}}>
+            <button onClick={onSwitch} style={{background:"transparent",border:"none",color:"#d4af37",fontFamily:"Georgia,serif",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>⇄ Switch to Show Entries</button>
+            <button onClick={onSignOut} style={{background:"transparent",border:"none",color:"#5a6a50",fontFamily:"Georgia,serif",fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Sign out</button>
+          </div>
+        </div>
+
+        <nav style={{display:"flex",justifyContent:"center",gap:8,marginBottom:20,flexWrap:"wrap"}}>
+          {tabs.map(t=><button key={t.key} onClick={()=>setTab(t.key)} style={tabBtn(tab===t.key)}>{t.label}</button>)}
+        </nav>
+
+        {loading&&<p style={{textAlign:"center",color:"#9aab8a"}}>Loading horses…</p>}
+        {!loading&&loadErr&&(
+          <Card><p style={{color:"#f87171",fontSize:14,marginTop:0}}>{loadErr}</p><Btn size="sm" onClick={load}>Retry</Btn></Card>
+        )}
+
+        {/* ── HORSE FORM ── */}
+        {editing&&(
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:9000,overflowY:"auto",padding:"20px 12px"}}>
+            <div style={{maxWidth:620,margin:"0 auto",background:"#0f2240",border:"1px solid rgba(212,175,55,0.3)",borderRadius:12,padding:"20px 16px"}}>
+              <h3 style={{color:"#d4af37",marginTop:0}}>{editing.id?`Edit ${editing.name||"horse"}`:"Add a horse"}</h3>
+              <div style={grid2}>
+                <Field label="Name *"><input style={inp} value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})}/></Field>
+                <Field label="Whose horse">
+                  <select style={sel} value={editing.ownerType} onChange={e=>setEditing({...editing,ownerType:e.target.value})}>
+                    {OWNER_TYPES.map(t=><option key={t.key} value={t.key}>{t.label}</option>)}
+                  </select>
+                </Field>
+                <Field label="Owner name"><input style={inp} value={editing.ownerName} onChange={e=>setEditing({...editing,ownerName:e.target.value})} placeholder={editing.ownerType==="own"?"e.g. Warrego Park":""}/></Field>
+                <Field label="Owner phone"><input style={inp} type="tel" value={editing.ownerPhone} onChange={e=>setEditing({...editing,ownerPhone:e.target.value})}/></Field>
+                <Field label="Arrival date"><input style={inp} type="date" value={editing.arrivalDate} onChange={e=>setEditing({...editing,arrivalDate:e.target.value})}/></Field>
+                <Field label="Departure date (blank = still here)"><input style={inp} type="date" value={editing.departureDate} onChange={e=>setEditing({...editing,departureDate:e.target.value})}/></Field>
+                <Field label="Paddock / yard"><input style={inp} value={editing.location} onChange={e=>setEditing({...editing,location:e.target.value})}/></Field>
+                <Field label="Breed">
+                  <select style={sel} value={editing.breed} onChange={e=>setEditing({...editing,breed:e.target.value})}>
+                    <option value="">—</option>{BREED_OPTIONS.map(b=><option key={b}>{b}</option>)}
+                  </select>
+                </Field>
+                <Field label="Sex">
+                  <select style={sel} value={editing.sex} onChange={e=>setEditing({...editing,sex:e.target.value})}>
+                    <option value="">—</option>{["Mare","Gelding","Stallion","Colt","Filly"].map(s=><option key={s}>{s}</option>)}
+                  </select>
+                </Field>
+                <Field label="Colour"><input style={inp} value={editing.colour} onChange={e=>setEditing({...editing,colour:e.target.value})}/></Field>
+                <Field label="Foaled (year or date)"><input style={inp} value={editing.dob} onChange={e=>setEditing({...editing,dob:e.target.value})}/></Field>
+                <Field label="Microchip"><input style={inp} value={editing.microchip} onChange={e=>setEditing({...editing,microchip:e.target.value})}/></Field>
+                {editing.ownerType!=="own"&&<>
+                  <Field label="Rate per week ($)"><input style={inp} type="number" inputMode="decimal" min="0" step="0.01" value={editing.ratePerWeek} onChange={e=>setEditing({...editing,ratePerWeek:e.target.value})}/></Field>
+                  <Field label="Paid up to"><input style={inp} type="date" value={editing.paidUpTo} onChange={e=>setEditing({...editing,paidUpTo:e.target.value})}/></Field>
+                </>}
+              </div>
+              <div style={{marginTop:12}}><Field label="Feed notes"><textarea style={{...inp,minHeight:60}} value={editing.feedNotes} onChange={e=>setEditing({...editing,feedNotes:e.target.value})}/></Field></div>
+              <div style={{marginTop:12}}><Field label="Other notes"><textarea style={{...inp,minHeight:60}} value={editing.notes} onChange={e=>setEditing({...editing,notes:e.target.value})}/></Field></div>
+              <div style={{display:"flex",gap:10,marginTop:16}}>
+                <Btn onClick={saveHorse}>Save</Btn>
+                <Btn variant="ghost" onClick={()=>setEditing(null)}>Cancel</Btn>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── CARE FORM ── */}
+        {careForm&&(
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:9000,overflowY:"auto",padding:"20px 12px"}}>
+            <div style={{maxWidth:460,margin:"0 auto",background:"#0f2240",border:"1px solid rgba(212,175,55,0.3)",borderRadius:12,padding:"20px 16px"}}>
+              <h3 style={{color:"#d4af37",marginTop:0}}>Record care — {horses.find(h=>h.id===careForm.horseId)?.name}</h3>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
+                {CARE_TYPES.map(t=><button key={t.key} style={chip(careForm.type===t.key)} onClick={()=>setCareForm({...careForm,type:t.key,nextDue:t.days?addDays(careForm.date||today,t.days):""})}>{t.icon} {t.label}</button>)}
+              </div>
+              <div style={grid2}>
+                <Field label="Date done"><input style={inp} type="date" value={careForm.date} onChange={e=>{const d=e.target.value;const t=careTypeOf(careForm.type);setCareForm({...careForm,date:d,nextDue:t.days&&d?addDays(d,t.days):careForm.nextDue});}}/></Field>
+                <Field label="Next due (optional)"><input style={inp} type="date" value={careForm.nextDue} onChange={e=>setCareForm({...careForm,nextDue:e.target.value})}/></Field>
+              </div>
+              <div style={{marginTop:12}}><Field label="Notes"><input style={inp} value={careForm.notes} onChange={e=>setCareForm({...careForm,notes:e.target.value})} placeholder="e.g. front shoes only, Equest Plus"/></Field></div>
+              <div style={{display:"flex",gap:10,marginTop:16}}>
+                <Btn onClick={saveCare}>Save</Btn>
+                <Btn variant="ghost" onClick={()=>setCareForm(null)}>Cancel</Btn>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── HORSES TAB ── */}
+        {!loading&&!loadErr&&tab==="horses"&&(
+          <div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
+              {[
+                {label:"On property",value:horses.filter(isHere).length},
+                ...OWNER_TYPES.slice(0,3).map(t=>({label:t.label,value:horses.filter(h=>isHere(h)&&h.ownerType===t.key).length})),
+              ].map(s=>(
+                <div key={s.label} style={{textAlign:"center",padding:"10px 6px",background:"rgba(212,175,55,0.05)",borderRadius:8,border:"1px solid rgba(212,175,55,0.13)"}}>
+                  <div style={{fontSize:22,color:"#d4af37",fontWeight:"bold"}}>{s.value}</div>
+                  <div style={{fontSize:11,color:"#9aab8a"}}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            {(overdueCount>0||weekCount>0)&&(
+              <button onClick={()=>setTab("due")} style={{width:"100%",textAlign:"left",marginBottom:14,padding:"10px 14px",borderRadius:8,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:13,border:`1px solid ${overdueCount?"rgba(239,68,68,0.4)":"rgba(234,179,8,0.4)"}`,background:overdueCount?"rgba(239,68,68,0.08)":"rgba(234,179,8,0.08)",color:overdueCount?"#f87171":"#eab308"}}>
+                {overdueCount>0&&`${overdueCount} overdue`}{overdueCount>0&&weekCount>0&&" · "}{weekCount>0&&`${weekCount} due this week`} — tap to see
+              </button>
+            )}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+              <Btn onClick={()=>setEditing({...EMPTY_HORSE,arrivalDate:today})}>+ Add horse</Btn>
+              {[["here","On property"],["left","Left"],["all","All"]].map(([k,l])=><button key={k} style={chip(filter===k)} onClick={()=>setFilter(k)}>{l}</button>)}
+            </div>
+            <input style={{...inp,marginBottom:14}} placeholder="Search name, owner, paddock…" value={search} onChange={e=>setSearch(e.target.value)}/>
+            {shown.length===0&&<p style={{color:"#8a9b7e",fontSize:14}}>{horses.length===0?"No horses yet — tap “+ Add horse” to start.":"No horses match."}</p>}
+            {shown.map(h=>{
+              const t=ownerTypeOf(h.ownerType); const open=openId===h.id;
+              const lc=latestCare(h.id);
+              const nextDue=Object.values(lc).filter(c=>c.nextDue).sort((a,b)=>a.nextDue.localeCompare(b.nextDue))[0];
+              const log=care.filter(c=>c.horseId===h.id).sort((a,b)=>b.date.localeCompare(a.date));
+              const owingWeeks=h.ownerType!=="own"&&h.paidUpTo&&isHere(h)&&h.paidUpTo<today?daysBetween(h.paidUpTo,today):0;
+              return (
+                <Card key={h.id} style={{marginBottom:10,padding:"14px 14px",opacity:isHere(h)?1:0.7}}>
+                  <div onClick={()=>setOpenId(open?null:h.id)} style={{cursor:"pointer"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                      <div style={{color:"#e8d5a3",fontSize:16,fontWeight:"bold"}}>{h.name}</div>
+                      <Pill color={t.color}>{t.label}</Pill>
+                    </div>
+                    <div style={{color:"#d4af37",fontSize:13,marginTop:4}}>{stayLine(h)}</div>
+                    <div style={{color:"#8a9b7e",fontSize:12,marginTop:3}}>
+                      {[h.ownerType!=="own"&&h.ownerName,h.location&&`📍 ${h.location}`].filter(Boolean).join(" · ")}
+                    </div>
+                    {nextDue&&isHere(h)&&<div style={{fontSize:12,marginTop:6,color:"#9aab8a",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>{careTypeOf(nextDue.type).icon} Next: {careTypeOf(nextDue.type).label} {dueBadge(daysBetween(today,nextDue.nextDue))}</div>}
+                    {owingWeeks>0&&<div style={{fontSize:12,marginTop:6}}><Pill color="#f87171">Paid to {fmtDate(h.paidUpTo)} · {wksDays(owingWeeks)} unpaid</Pill></div>}
+                  </div>
+                  {open&&(
+                    <div style={{marginTop:12,borderTop:"1px solid rgba(212,175,55,0.12)",paddingTop:12,fontSize:13,color:"#c9b88a"}}>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:"6px 14px"}}>
+                        {[
+                          ["Arrived",fmtDate(h.arrivalDate)],["Left",fmtDate(h.departureDate)],
+                          ["Owner",h.ownerName],["Phone",h.ownerPhone&&<a href={`tel:${h.ownerPhone}`} style={{color:"#d4af37"}}>{h.ownerPhone}</a>],
+                          ["Breed",h.breed],["Sex",h.sex],["Colour",h.colour],["Foaled",h.dob],["Microchip",h.microchip],
+                          ["Rate",h.ratePerWeek!==""&&`$${Number(h.ratePerWeek).toFixed(2)}/wk`],["Paid up to",fmtDate(h.paidUpTo)],
+                        ].filter(([,v])=>v).map(([k,v])=><div key={k}><span style={{color:"#8a9b7e"}}>{k}: </span>{v}</div>)}
+                      </div>
+                      {h.feedNotes&&<p style={{margin:"10px 0 0"}}><span style={{color:"#8a9b7e"}}>Feed: </span>{h.feedNotes}</p>}
+                      {h.notes&&<p style={{margin:"6px 0 0"}}><span style={{color:"#8a9b7e"}}>Notes: </span>{h.notes}</p>}
+
+                      <h4 style={{color:"#d4af37",fontSize:13,margin:"16px 0 8px",letterSpacing:"0.05em"}}>Care</h4>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
+                        {CARE_TYPES.map(ct=>{const c=lc[ct.key];return c?(
+                          <span key={ct.key} style={{fontSize:12,padding:"4px 8px",borderRadius:6,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(212,175,55,0.12)"}}>
+                            {ct.icon} {ct.label}: {fmtDate(c.date)} {c.nextDue&&dueBadge(daysBetween(today,c.nextDue))}
+                          </span>
+                        ):null;})}
+                      </div>
+                      <Btn size="sm" onClick={()=>openCareForm(h.id)}>+ Record farrier / worming / vet…</Btn>
+                      {log.length>0&&(
+                        <div style={{marginTop:10}}>
+                          {log.slice(0,12).map(c=>(
+                            <div key={c.id} style={{display:"flex",gap:8,alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:12}}>
+                              <span style={{minWidth:92,color:"#8a9b7e"}}>{fmtDate(c.date)}</span>
+                              <span style={{flex:1}}>{careTypeOf(c.type).icon} {careTypeOf(c.type).label}{c.notes?` — ${c.notes}`:""}</span>
+                              <button onClick={()=>removeCare(c)} style={{background:"transparent",border:"none",color:"#5a6a50",cursor:"pointer",fontSize:14}} aria-label="Remove record">✕</button>
+                            </div>
+                          ))}
+                          {log.length>12&&<p style={{fontSize:11,color:"#5a6a50",margin:"6px 0 0"}}>Showing latest 12 of {log.length}</p>}
+                        </div>
+                      )}
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:16}}>
+                        <Btn size="sm" variant="ghost" onClick={()=>setEditing({...h})}>✏️ Edit</Btn>
+                        {isHere(h)&&<Btn size="sm" variant="ghost" onClick={()=>markLeft(h)}>🚚 Mark as left today</Btn>}
+                        <Btn size="sm" variant="danger" onClick={()=>removeHorse(h)}>Remove</Btn>
+                      </div>
+                    </div>
+                  )}
+                </Card>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── DUE TAB ── */}
+        {!loading&&!loadErr&&tab==="due"&&(
+          <Card>
+            <h3 style={{color:"#d4af37",fontSize:15,marginTop:0}}>Care coming up</h3>
+            <p style={{color:"#8a9b7e",fontSize:12,marginTop:-4}}>Based on the "next due" date of the latest record for each horse. Horses that have left aren't shown.</p>
+            {dueItems.length===0&&<p style={{color:"#8a9b7e",fontSize:14}}>Nothing scheduled. When you record farrier, worming etc. with a next-due date, it'll show up here.</p>}
+            {[["Overdue",d=>d.diff<0],["This week",d=>d.diff>=0&&d.diff<=7],["Next 30 days",d=>d.diff>7&&d.diff<=30],["Later",d=>d.diff>30]].map(([title,fn])=>{
+              const items=dueItems.filter(fn); if(!items.length) return null;
+              return (
+                <div key={title} style={{marginBottom:14}}>
+                  <p style={{fontSize:11,color:"#8a9b7e",textTransform:"uppercase",letterSpacing:"0.08em",margin:"10px 0 4px"}}>{title}</p>
+                  {items.map(({horse,c,diff})=>(
+                    <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:"1px solid rgba(255,255,255,0.05)",flexWrap:"wrap"}}>
+                      <span style={{flex:"1 1 160px"}}><b style={{color:"#e8d5a3"}}>{horse.name}</b> <span style={{color:"#9aab8a",fontSize:13}}>{careTypeOf(c.type).icon} {careTypeOf(c.type).label}</span></span>
+                      <span style={{fontSize:12,color:"#8a9b7e"}}>{fmtDate(c.nextDue)}</span>
+                      {dueBadge(diff)}
+                      <Btn size="sm" variant="ghost" onClick={()=>openCareForm(horse.id,c.type)}>Done ✓</Btn>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </Card>
+        )}
+
+        {/* ── INVOICES TAB ── */}
+        {!loading&&!loadErr&&tab==="invoices"&&(
+          <div>
+            <Card style={{marginBottom:14}}>
+              <h3 style={{color:"#d4af37",fontSize:15,marginTop:0}}>Days on property</h3>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                <button style={chip(invFrom===monthBounds(0)[0]&&invTo===monthBounds(0)[1])} onClick={()=>setInvRange(monthBounds(0))}>This month</button>
+                <button style={chip(invFrom===monthBounds(-1)[0]&&invTo===monthBounds(-1)[1])} onClick={()=>setInvRange(monthBounds(-1))}>Last month</button>
+              </div>
+              <div style={grid2}>
+                <Field label="From"><input style={inp} type="date" value={invFrom} onChange={e=>e.target.value&&setInvRange([e.target.value,invTo])}/></Field>
+                <Field label="To"><input style={inp} type="date" value={invTo} onChange={e=>e.target.value&&setInvRange([invFrom,e.target.value])}/></Field>
+              </div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
+                {OWNER_TYPES.map(t=><button key={t.key} style={chip(invTypes.includes(t.key))} onClick={()=>setInvTypes(ts=>ts.includes(t.key)?ts.filter(x=>x!==t.key):[...ts,t.key])}>{t.label}</button>)}
+              </div>
+              <p style={{color:"#8a9b7e",fontSize:12,margin:"10px 0 0"}}>Counts each day the horse was here in that period — arrival day counts, the day it left doesn't. Amount = weekly rate ÷ 7 × days.</p>
+            </Card>
+            {invTo<invFrom&&<p style={{color:"#f87171",fontSize:13}}>"To" is before "From".</p>}
+            {invOwners.length===0&&invTo>=invFrom&&<p style={{color:"#8a9b7e",fontSize:14}}>No horses here in that period for the selected types.</p>}
+            {invOwners.map(owner=>{
+              const rows=invGroups[owner];
+              const total=rows.reduce((s,r)=>s+(r.amount||0),0);
+              const anyRate=rows.some(r=>r.amount!=null);
+              return (
+                <Card key={owner} style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
+                    <b style={{color:"#e8d5a3",fontSize:15}}>{owner}</b>
+                    <Btn size="sm" variant="ghost" onClick={()=>copyInvoice(owner)}>📋 Copy</Btn>
+                  </div>
+                  {rows.map(r=>(
+                    <div key={r.h.id} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.05)",fontSize:13,flexWrap:"wrap"}}>
+                      <span>{r.h.name} <span style={{color:"#8a9b7e"}}>· {r.days} days ({wksDays(r.days)})</span></span>
+                      <span style={{color:r.amount!=null?"#d4af37":"#5a6a50"}}>{r.amount!=null?`$${r.amount.toFixed(2)}`:"no rate set"}</span>
+                    </div>
+                  ))}
+                  {anyRate&&<div style={{textAlign:"right",marginTop:8,color:"#d4af37",fontWeight:"bold"}}>Total ${total.toFixed(2)}</div>}
+                </Card>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── ACCESS TAB ── */}
+        {!loading&&tab==="access"&&(
+          <Card>
+            <h3 style={{color:"#d4af37",fontSize:15,marginTop:0}}>Organiser logins</h3>
+            <p style={{color:"#8a9b7e",fontSize:12,marginTop:-4}}>Logins with access see the choice screen. Logins without it (e.g. show-day helpers) go straight to Show Entries and never see horse records.</p>
+            {orgAccounts.map(a=>{
+              const locked=a.id==="org1"||a.id===user.id;
+              const has=a.id==="org1"||!!a.propertyAccess;
+              return (
+                <div key={a.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:"1px solid rgba(255,255,255,0.05)"}}>
+                  <div style={{flex:1}}><div style={{color:"#e8d5a3",fontSize:14}}>{a.name}</div><div style={{color:"#8a9b7e",fontSize:12}}>@{a.username}</div></div>
+                  {locked
+                    ? <Pill color="#4ade80">{a.id===user.id?"You · full access":"Full access"}</Pill>
+                    : <Btn size="sm" variant={has?"gold":"ghost"} onClick={()=>toggleAccess(a)}>{has?"✓ Has access":"No access"}</Btn>}
+                </div>
+              );
+            })}
+            {!helperForm&&<div style={{marginTop:14}}><Btn size="sm" variant="ghost" onClick={()=>setHelperForm({name:"",username:"",password:""})}>+ Add a show-day helper login</Btn></div>}
+            {helperForm&&(
+              <div style={{marginTop:14}}>
+                <div style={grid2}>
+                  <Field label="Name"><input style={inp} value={helperForm.name} onChange={e=>setHelperForm({...helperForm,name:e.target.value})}/></Field>
+                  <Field label="Username"><input style={inp} autoCapitalize="none" value={helperForm.username} onChange={e=>setHelperForm({...helperForm,username:e.target.value})}/></Field>
+                  <Field label="Password"><input style={inp} value={helperForm.password} onChange={e=>setHelperForm({...helperForm,password:e.target.value})}/></Field>
+                </div>
+                <div style={{display:"flex",gap:10,marginTop:12}}>
+                  <Btn size="sm" onClick={addHelper}>Create login</Btn>
+                  <Btn size="sm" variant="ghost" onClick={()=>setHelperForm(null)}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [loading,setLoading]=useState(true);
   const [loadError,setLoadError]=useState("");
@@ -1406,9 +1941,13 @@ export default function App() {
   const [addingRiderForClientId,setAddingRiderForClientId]=useState(null);
   const [editingAccount,setEditingAccount]=useState(null);
   const [notifications,setNotifications]=useState([]); // [{id,msg,classId,seen}]
+  const [orgSection,setOrgSection]=useState(null); // null = choice screen, "show" or "property"
 
   const showToast=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),2800);};
   const isOrg=user?.role==="organiser";
+  // Main organiser login always has property access; other organiser logins only if switched on.
+  const hasPropertyAccess=isOrg&&(user?.id==="org1"||!!accounts.find(a=>a.id===user?.id)?.propertyAccess);
+  const signOut=()=>{setUser(null);setView("home");setOrgSection(null);try{localStorage.removeItem("warrego_uid");}catch(err){console.error(err);}};
 
   // ── Handle return from Stripe Checkout ──
   useEffect(()=>{
@@ -1440,6 +1979,7 @@ export default function App() {
           id: a.id, name: a.name, role: a.role, username: a.username, password: a.password,
           phone: a.phone, address: a.address, suburb: a.suburb, state: a.state, postcode: a.postcode,
           emergency: a.emergency, emergencyPhone: a.emergency_phone, memberNum: a.member_num,
+          propertyAccess: !!a.property_access,
         }));
         setAccounts(dbAccounts.length ? dbAccounts : SEED_ACCOUNTS);
 
@@ -1966,6 +2506,8 @@ export default function App() {
     try { await db.upsertPayment(user.id, "pending", claimedAmount); }
     catch(err) { console.error(err); showToast(syncFailMessage("Payment recorded",err),"error"); }
   }} onBack={()=>setShowPayment(false)}/>;
+  if(hasPropertyAccess&&!orgSection) return <OrgHub user={user} onPick={setOrgSection} onSignOut={signOut}/>;
+  if(hasPropertyAccess&&orgSection==="property") return <PropertyManager user={user} accounts={accounts} setAccounts={setAccounts} onSwitch={()=>setOrgSection("show")} onSignOut={signOut}/>;
   if(user.role==="spectator") return <SpectatorView entries={entries} scores={scores} classStartTimes={classStartTimes} onBack={()=>{setUser(null);try{localStorage.removeItem("warrego_uid");}catch(err){console.error(err);}}}/>;
 
   const navItems=[
@@ -2231,7 +2773,8 @@ export default function App() {
             {!isOrg&&<button onClick={()=>setView("notifications")} style={{background:"transparent",border:"none",color:myUnseen>0?"#d4af37":"#8a9b7e",fontFamily:"Georgia,serif",fontSize:12,cursor:"pointer",position:"relative"}}>
               🔔 {myUnseen>0&&<span style={{background:"#f87171",color:"#fff",borderRadius:"50%",fontSize:10,padding:"1px 5px",marginLeft:4}}>{myUnseen}</span>}
             </button>}
-            <button onClick={()=>{setUser(null);setView("home");try{localStorage.removeItem("warrego_uid");}catch(err){console.error(err);}}} style={{background:"transparent",border:"none",color:"#5a6a50",fontFamily:"Georgia,serif",fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Sign out</button>
+            {hasPropertyAccess&&<button onClick={()=>setOrgSection("property")} style={{background:"transparent",border:"none",color:"#d4af37",fontFamily:"Georgia,serif",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>⇄ Horses & Property</button>}
+            <button onClick={signOut} style={{background:"transparent",border:"none",color:"#5a6a50",fontFamily:"Georgia,serif",fontSize:11,cursor:"pointer",textDecoration:"underline"}}>Sign out</button>
           </div>
           {nominations&&!isOrg&&<p style={{textAlign:"center",fontSize:12,color:"#f87171",marginTop:6}}>🔒 Entries are now closed</p>}
         </div>
